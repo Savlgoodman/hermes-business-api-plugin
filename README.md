@@ -78,6 +78,21 @@ Authorization: Bearer <BUSINESS_API_KEY>
 
 调用 Hermes agent 的 Responses 接口，兼容 OpenAI Responses API 规范，支持通过 `previous_response_id` 延续上下文。
 
+返回的 `usage` 对象中包含扩展字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `input_tokens` | 本轮请求的输入 token 数 |
+| `output_tokens` | 本轮请求的输出 token 数 |
+| `cache_read_tokens` | 从缓存读取的 token 数 |
+| `cache_write_tokens` | 写入缓存的 token 数 |
+| `reasoning_tokens` | 推理 token 数 |
+| `total_tokens` | 总 token 数 |
+| `context_window` | 模型上下文窗口总容量 |
+| `context_used` | 当前已使用的上下文 |
+| `context_usage_pct` | 上下文占用百分比 |
+| `compression_count` | 本会话已触发自动压缩的次数 |
+
 示例：
 
 ```bash

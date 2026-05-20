@@ -110,6 +110,7 @@ class BusinessAPIAdapter(APIServerAdapter):
             DEFAULT_MAX_UPLOAD_BYTES,
         )
         self._turn_usage_by_task: dict[int, Dict[str, Any]] = {}
+        self._last_agent: Any = None
 
     @property
     def name(self) -> str:
@@ -167,7 +168,7 @@ class BusinessAPIAdapter(APIServerAdapter):
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
         fallback_model = GatewayRunner._load_fallback_model()
 
-        return AIAgent(
+        agent = AIAgent(
             model=model,
             **runtime_kwargs,
             max_iterations=max_iterations,
@@ -186,6 +187,12 @@ class BusinessAPIAdapter(APIServerAdapter):
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
         )
+
+        # Store so _context_window_info can read compression info after
+        # run_in_executor finishes (agent is created inside a thread).
+        self._last_agent = agent
+
+        return agent
 
     async def connect(self) -> bool:
         """Start the business API aiohttp server."""
@@ -302,6 +309,8 @@ class BusinessAPIAdapter(APIServerAdapter):
         result, usage = await super()._run_agent(*args, **kwargs)
         if isinstance(result, dict):
             usage = self._extended_usage_from_result(result, usage or {})
+            # Enrich usage with context window and compression info.
+            usage.update(self._context_window_info())
             task = asyncio.current_task()
             if task is not None:
                 usage_meta = dict(usage)
@@ -309,6 +318,31 @@ class BusinessAPIAdapter(APIServerAdapter):
                     usage_meta["_session_id"] = result["session_id"]
                 self._turn_usage_by_task[id(task)] = usage_meta
         return result, usage
+
+    def _context_window_info(self) -> Dict[str, Any]:
+        """Read context window usage and compression count from the agent."""
+        info: Dict[str, Any] = {}
+        agent = self._last_agent
+        if agent is None:
+            return info
+
+        cc = getattr(agent, "context_compressor", None)
+        if cc is not None:
+            context_length = getattr(cc, "context_length", 0) or 0
+            last_prompt = getattr(cc, "last_prompt_tokens", 0) or 0
+            compression_count = getattr(cc, "compression_count", 0) or 0
+
+            if context_length > 0:
+                info["context_window"] = context_length
+                info["context_used"] = last_prompt
+                usage_pct = min(100, round(last_prompt / context_length * 100, 1))
+                info["context_usage_pct"] = usage_pct
+
+            if compression_count > 0:
+                info["compression_count"] = compression_count
+
+        self._last_agent = None
+        return info
 
     async def _handle_responses(self, request: "web.Request") -> "web.Response":
         """Run the base Responses handler, then enrich stored usage metadata."""
@@ -422,6 +456,7 @@ class BusinessAPIAdapter(APIServerAdapter):
         include_messages_bool = include_messages not in {"0", "false", "no", "off"}
         response_model = response_obj.get("model") or stored.get("model")
         actual_model = session_usage.get("model") or response_model
+        turn = stored.get("turn_usage") or response_obj.get("usage") or {}
         context = {
             "object": "business_api.response_context",
             "response_id": response_id,
@@ -431,8 +466,14 @@ class BusinessAPIAdapter(APIServerAdapter):
             "model": actual_model,
             "response_model": response_model,
             "usage": {
-                "turn": stored.get("turn_usage") or response_obj.get("usage") or {},
+                "turn": turn,
                 "session_total": session_usage,
+            },
+            "context_window": {
+                "total": turn.get("context_window"),
+                "used": turn.get("context_used"),
+                "usage_pct": turn.get("context_usage_pct"),
+                "compression_count": turn.get("compression_count"),
             },
             "instructions": stored.get("instructions"),
             "response": response_obj,
