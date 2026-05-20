@@ -20,6 +20,15 @@ from typing import Any
 import requests
 
 
+def _format_tokens(n: int) -> str:
+    """Format token count with K/M suffix for display."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
 def _load_hermes_env() -> None:
     """Load ~/.hermes/.env for direct python script runs."""
     env_path = os.path.expanduser("~/.hermes/.env")
@@ -123,24 +132,49 @@ def main() -> int:
         response = _request_json("POST", f"{base_url}/v1/responses", headers=headers, json=payload)
         previous_response_id = response["id"]
 
-        include = "false" if args.no_context_messages else "true"
-        context = _request_json(
-            "GET",
-            f"{base_url}/api/responses/{previous_response_id}/context?include_messages={include}",
-            headers=headers,
-        )
+        # Usage is already included in the /v1/responses response body.
+        # Only call /context endpoint when session-level cumulative usage
+        # or full conversation history is needed.
+        resp_usage = response.get("usage") or {}
 
         print("\nAssistant:")
         print(_output_text(response))
-        print("\nContext:")
+        print("\nUsage:")
         print(f"  response_id: {previous_response_id}")
-        print(f"  session_id:  {context.get('session_id')}")
-        print(f"  model:       {context.get('model')}")
+        print(f"  model:       {response.get('model')}")
         print(f"  latency:     {time.time() - started:.2f}s")
-        print(f"  turn:        {_usage_line((context.get('usage') or {}).get('turn') or {})}")
-        print(f"  session:     {_usage_line((context.get('usage') or {}).get('session_total') or {})}")
+        print(f"  turn:        {_usage_line(resp_usage)}")
+
+        # Display context window occupancy if available
+        ctx_total = resp_usage.get("context_window")
+        ctx_used = resp_usage.get("context_used")
+        if ctx_total and ctx_used is not None:
+            pct = resp_usage.get("context_usage_pct", "??")
+            comp = resp_usage.get("compression_count", 0)
+            comp_note = f", compressed {comp}x" if comp else ""
+            print(f"  context:     {_format_tokens(ctx_used)}/{_format_tokens(ctx_total)} ({pct}%{comp_note})")
+
+        # Fetch session-level cumulative usage from context endpoint
         if not args.no_context_messages:
-            print(f"  messages:    {len(context.get('messages') or [])}")
+            include = "true"
+        else:
+            include = "false"
+        try:
+            context = _request_json(
+                "GET",
+                f"{base_url}/api/responses/{previous_response_id}/context?include_messages={include}",
+                headers=headers,
+                timeout=30,
+            )
+            session_usage = (context.get("usage") or {}).get("session_total") or {}
+            session_total_tokens = session_usage.get("total_tokens", 0)
+            if session_total_tokens > 0:
+                print(f"  session:     {_usage_line(session_usage)}")
+            if not args.no_context_messages:
+                print(f"  messages:    {len(context.get('messages') or [])}")
+        except Exception:
+            # Context endpoint is optional — don't fail the turn if unavailable
+            pass
 
     if args.once:
         send_turn(args.once)
