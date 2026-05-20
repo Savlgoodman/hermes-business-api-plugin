@@ -1,0 +1,32 @@
+name: business-api-platform
+label: Business API
+kind: platform
+version: 1.0.0
+description: >
+  Business HTTP API gateway adapter for Hermes Agent.
+  Exposes an OpenAI-compatible Responses endpoint with Hermes-specific
+  context and usage inspection, plus guarded file upload/download endpoints for
+  server-side Docker/workspace deployments.
+author: Hermes Agent
+requires_env:
+  - name: BUSINESS_API_KEY
+    description: "Bearer token required for Business API requests"
+    prompt: "Business API bearer token"
+    password: true
+optional_env:
+  - name: BUSINESS_API_ENABLED
+    description: "Enable the Business API gateway platform"
+    prompt: "Enable Business API? (true/false)"
+    password: false
+  - name: BUSINESS_API_HOST
+    description: "Business API listen host (default: 127.0.0.1)"
+    prompt: "Business API host"
+    password: false
+  - name: BUSINESS_API_PORT
+    description: "Business API listen port (default: 8765)"
+    prompt: "Business API port"
+    password: false
+  - name: BUSINESS_API_WORKSPACE_ROOT
+    description: "Allowed upload root (default: /opt/workspace)"
+    prompt: "Business API workspace root"
+    password: false
