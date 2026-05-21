@@ -344,13 +344,82 @@ class BusinessAPIAdapter(APIServerAdapter):
         self._last_agent = None
         return info
 
+    def _enrich_stored_for_streaming(self, response_ids: list) -> None:
+        """Enrich the ResponseStore snapshot after a streaming response.
+
+        The parent's SSE writer persists a snapshot with only 3 usage fields.
+        We add extended usage, context window info, and session_id here.
+        """
+        if not response_ids:
+            return
+
+        # Pop the most recent enriched usage entry from the task dict.
+        usage = None
+        if self._turn_usage_by_task:
+            usage = self._turn_usage_by_task.pop(next(iter(self._turn_usage_by_task)))
+
+        if not usage:
+            return
+
+        actual_session_id = usage.pop("_session_id", None) if isinstance(usage, dict) else None
+
+        for rid in response_ids:
+            try:
+                stored = self._response_store.get(rid)
+                if not isinstance(stored, dict):
+                    continue
+                if stored.get("turn_usage"):
+                    # Already enriched (e.g. non-streaming call).
+                    continue
+                if isinstance(usage, dict) and usage:
+                    stored["turn_usage"] = usage
+                    stored_response = stored.get("response")
+                    if isinstance(stored_response, dict):
+                        stored_response["usage"] = usage
+                if actual_session_id:
+                    stored["session_id"] = actual_session_id
+                self._response_store.put(rid, stored)
+            except Exception:
+                logger.debug("Failed to enrich streaming response metadata for %s", rid, exc_info=True)
+
     async def _handle_responses(self, request: "web.Request") -> "web.Response":
-        """Run the base Responses handler, then enrich stored usage metadata."""
+        """Run the base Responses handler, then enrich stored usage metadata.
+
+        For non-streaming: enriches the response body and stored data inline.
+        For streaming: the SSE writer in the parent writes everything directly
+        to the socket and persists a snapshot with only 3 usage fields; we
+        enrich that stored snapshot afterward with extended usage and context
+        window info.
+        """
         task = asyncio.current_task()
         task_key = id(task) if task is not None else 0
-        response = await super()._handle_responses(request)
-        if not isinstance(response, web.Response) or response.content_type != "application/json":
+
+        # For streaming we need to discover which response_ids were written
+        # to the store, since POST /v1/responses has no response_id in the URL.
+        captured_ids: list = []
+        original_put = self._response_store.put
+
+        def _capturing_put(rid, data, **kw):
+            captured_ids.append(rid)
+            return original_put(rid, data, **kw)
+
+        self._response_store.put = _capturing_put
+
+        try:
+            response = await super()._handle_responses(request)
+        finally:
+            self._response_store.put = original_put
+
+        # Streaming path — parent returns StreamResponse, enrichment code
+        # below won't apply to the body, but we can still enrich the
+        # ResponseStore snapshot that _write_sse_responses persisted.
+        if not isinstance(response, web.Response):
+            self._enrich_stored_for_streaming(captured_ids)
             return response
+
+        if response.content_type != "application/json":
+            return response
+
         try:
             payload = response.body
             if not payload:

@@ -1,8 +1,7 @@
 """Interactive smoke tester for the Hermes Business API platform.
 
 Usage:
-  set BUSINESS_API_KEY=...
-  uv run python scripts/business_api_chat.py
+  uv run python business_api_chat.py
 
 The script keeps ``previous_response_id`` between turns and prints the
 response-context usage metadata after each assistant reply.
@@ -11,6 +10,7 @@ response-context usage metadata after each assistant reply.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -29,24 +29,36 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
-def _load_hermes_env() -> None:
-    """Load ~/.hermes/.env for direct python script runs."""
-    env_path = os.path.expanduser("~/.hermes/.env")
-    if not os.path.exists(env_path):
-        return
-    try:
-        with open(env_path, "r", encoding="utf-8-sig") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip("'\"")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-    except OSError:
-        return
+def _base_url_from_port_or_url(value: str) -> str:
+    """Accept a port, host:port, or full URL and return a base URL."""
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("empty value")
+    if cleaned.isdigit():
+        port = int(cleaned)
+        if port < 1 or port > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return f"http://127.0.0.1:{port}"
+    if "://" not in cleaned:
+        cleaned = f"http://{cleaned}"
+    return cleaned.rstrip("/")
+
+
+def _prompt_base_url() -> str:
+    while True:
+        raw = input("Business API port or base URL [8765]: ").strip() or "8765"
+        try:
+            return _base_url_from_port_or_url(raw)
+        except ValueError as exc:
+            print(f"Invalid Business API port/base URL: {exc}", file=sys.stderr)
+
+
+def _prompt_api_key() -> str:
+    while True:
+        key = getpass.getpass("Business API key: ").strip()
+        if key:
+            return key
+        print("Business API key is required.", file=sys.stderr)
 
 
 def _usage_line(usage: dict[str, Any]) -> str:
@@ -86,11 +98,10 @@ def _request_json(method: str, url: str, *, headers: dict[str, str], **kwargs: A
 
 
 def main() -> int:
-    _load_hermes_env()
-
     parser = argparse.ArgumentParser(description="Chat through Hermes Business API and print context metadata.")
-    parser.add_argument("--base-url", default=os.getenv("BUSINESS_API_BASE_URL", "http://127.0.0.1:8765"))
-    parser.add_argument("--api-key", default=os.getenv("BUSINESS_API_KEY"))
+    parser.add_argument("--base-url", default="", help="Skip the startup prompt and connect to this base URL.")
+    parser.add_argument("--port", type=int, default=None, help="Skip the startup prompt and use localhost on this port.")
+    parser.add_argument("--api-key", default="", help="Skip the startup prompt and use this API key.")
     parser.add_argument("--model", default=os.getenv("BUSINESS_API_MODEL", ""))
     parser.add_argument("--conversation", default=os.getenv("BUSINESS_API_CONVERSATION", "business-api-smoke"))
     parser.add_argument("--system", default=os.getenv("BUSINESS_API_SYSTEM", ""))
@@ -98,13 +109,24 @@ def main() -> int:
     parser.add_argument("--no-context-messages", action="store_true")
     args = parser.parse_args()
 
-    if not args.api_key:
-        print("Missing BUSINESS_API_KEY. Set it in the environment or pass --api-key.", file=sys.stderr)
-        return 2
+    if args.base_url and args.port is not None:
+        parser.error("Use either --base-url or --port, not both.")
 
-    base_url = args.base_url.rstrip("/")
-    headers = {"Authorization": f"Bearer {args.api_key}", "Content-Type": "application/json"}
+    try:
+        if args.base_url:
+            base_url = _base_url_from_port_or_url(args.base_url)
+        elif args.port is not None:
+            base_url = _base_url_from_port_or_url(str(args.port))
+        else:
+            base_url = _prompt_base_url()
+        api_key = args.api_key.strip() or _prompt_api_key()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     previous_response_id: str | None = None
+    conversation = args.conversation
 
     try:
         health = _request_json("GET", f"{base_url}/health", headers=headers, timeout=30)
@@ -121,8 +143,8 @@ def main() -> int:
         }
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
-        elif args.conversation:
-            payload["conversation"] = args.conversation
+        elif conversation:
+            payload["conversation"] = conversation
         if args.model:
             payload["model"] = args.model
         if args.system:
@@ -193,6 +215,7 @@ def main() -> int:
             return 0
         if message == "/reset":
             previous_response_id = None
+            conversation = f"{args.conversation}-{int(time.time())}" if args.conversation else None
             print("Conversation chain reset.")
             continue
         try:
