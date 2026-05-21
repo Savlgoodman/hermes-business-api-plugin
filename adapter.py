@@ -49,7 +49,9 @@ DEFAULT_PORT = 8765
 DEFAULT_WORKSPACE_ROOT = "/opt/workspace"
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_FILE_FIELD_BYTES = 256 * 1024
-_INVALID_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
+# Block dangerous characters (controls, path separators, Windows forbidden).
+# Chinese and other Unicode is preserved.
+_INVALID_FILENAME_CHARS = re.compile(r"[\x00-\x1f\x7f\\/:*?\"<>|]+")
 _CONTROL_CHARS = re.compile(r"[\r\n\x00]")
 
 
